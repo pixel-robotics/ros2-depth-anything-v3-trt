@@ -483,7 +483,7 @@ bool TrtCommon::buildEngineFromOnnx(
 #endif
   }
 
-#if TENSORRT_VERSION_MAJOR >= 8
+#if NV_TENSORRT_MAJOR >= 8
   auto plan =
     TrtUniquePtr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
   if (!plan) {
@@ -502,7 +502,7 @@ bool TrtCommon::buildEngineFromOnnx(
   }
 
   // save engine
-#if TENSORRT_VERSION_MAJOR < 8
+#if NV_TENSORRT_MAJOR < 8
   auto data = TrtUniquePtr<nvinfer1::IHostMemory>(engine_->serialize());
 #endif
   std::ofstream file;
@@ -510,7 +510,7 @@ bool TrtCommon::buildEngineFromOnnx(
   if (!file.is_open()) {
     return false;
   }
-#if TENSORRT_VERSION_MAJOR < 8
+#if NV_TENSORRT_MAJOR < 8
   file.write(reinterpret_cast<const char *>(data->data()), data->size());
 #else
   file.write(reinterpret_cast<const char *>(plan->data()), plan->size());
