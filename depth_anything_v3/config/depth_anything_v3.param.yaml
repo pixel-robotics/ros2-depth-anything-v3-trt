@@ -2,7 +2,7 @@ depth_anything_v3:
   ros__parameters:
     # Model configuration
     onnx_path: "/data/DA3METRIC-LARGE.onnx"
-    precision: "fp16"  # fp16 or fp32
+    precision: "fp32"  # fp16 or fp32
     
     # Debug configuration
     enable_debug: true
@@ -10,7 +10,7 @@ depth_anything_v3:
     debug_filepath: "/tmp/depth_anything_v3_debug/"
     write_colormap: false
     debug_colormap_min_depth: 0.0    # Minimum depth value for colormap visualization
-    debug_colormap_max_depth: 50.0   # Maximum depth value for colormap visualization
+    debug_colormap_max_depth: 10.0   # Maximum depth value for colormap visualization
     sky_threshold: 0.3               # Threshold for sky classification (lower = more sky)
     sky_depth_cap: 200.0             # Maximum depth value to fill sky regions
     

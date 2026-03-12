@@ -133,6 +133,7 @@ public:
   std::vector<CudaUniquePtr<float[]>> extra_output_buffers_;
   cv::Mat model_depth_;
   cv::Mat sky_mask_;
+  cv::Mat prev_depth_;  // for temporal EMA smoothing
 
   StreamUniquePtr stream_{makeCudaStream()};
 

@@ -164,9 +164,16 @@ void DepthAnythingV3Node::onImageCameraInfo(
     RCLCPP_INFO(get_logger(), "TensorRT preprocessing buffer initialized");
   }
 
+  // Log input image statistics to detect brightness flicker
+  {
+    const cv::Scalar img_mean = cv::mean(in_image_ptr->image);
+    RCLCPP_INFO(get_logger(), "Input image mean BGR: %.2f / %.2f / %.2f",
+      img_mean[0], img_mean[1], img_mean[2]);
+  }
+
   std::vector<cv::Mat> input_images;
   input_images.push_back(in_image_ptr->image);
-  
+
   auto start = std::chrono::high_resolution_clock::now();
   bool success = tensorrt_depth_anything_->doInference(input_images, *camera_info_msg, node_param_.point_cloud_downsample_factor, node_param_.colorize_point_cloud);
   auto end = std::chrono::high_resolution_clock::now();

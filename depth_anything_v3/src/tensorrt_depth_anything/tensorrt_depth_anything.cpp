@@ -178,9 +178,12 @@ TensorRTDepthAnything::TensorRTDepthAnything(
   // Get input dimensions
   const auto input_dims = trt_common_->getBindingDimensions(0);
   const int input_channels = input_dims.d[1];
-  input_height_ = input_dims.d[2]; 
+  input_height_ = input_dims.d[2];
   input_width_ = input_dims.d[3];
-  
+  RCLCPP_INFO(rclcpp::get_logger("TensorRTDepthAnything"),
+    "Model input dims: [%d, %d, %d, %d] (N, C, H, W)",
+    input_dims.d[0], input_channels, input_height_, input_width_);
+
   // Allocate input memory
   const size_t input_elem_num = batch_size_ * input_channels * input_height_ * input_width_;
   input_d_ = cuda_utils::make_unique<float[]>(input_elem_num);
@@ -391,9 +394,12 @@ void TensorRTDepthAnything::postprocess(
   // Inspect raw output before scaling.
   double raw_min = 0.0, raw_max = 0.0;
   cv::minMaxLoc(model_depth_, &raw_min, &raw_max);
-  RCLCPP_DEBUG(
+  const double raw_mean = cv::mean(model_depth_)[0];
+  const int sky_pixel_count = cv::countNonZero(~sky_mask_);
+  RCLCPP_INFO(
     rclcpp::get_logger("TensorRTDepthAnything"),
-    "Raw net output min/max: %.6f / %.6f", raw_min, raw_max);
+    "Raw net output min/max/mean: %.6f / %.6f / %.6f  sky_pixels: %d / %zu",
+    raw_min, raw_max, raw_mean, sky_pixel_count, plane_size);
 
   // Clean and scale to metric depth.
   cv::Mat depth_map = model_depth_.clone();
@@ -440,17 +446,24 @@ void TensorRTDepthAnything::postprocess(
     }
   }
 
+  // Temporal smoothing (EMA) to stabilize depth across frames.
+  if (prev_depth_.empty() || prev_depth_.size() != depth_map.size()) {
+    prev_depth_ = depth_map.clone();
+  } else {
+    constexpr float alpha = 0.3f;  // 0.0 = no change, 1.0 = no smoothing
+    cv::addWeighted(depth_map, alpha, prev_depth_, 1.0 - alpha, 0.0, depth_map);
+    prev_depth_ = depth_map.clone();
+  }
+
   // Persist scaled depth for point cloud generation at network resolution.
   model_depth_ = depth_map.clone();
 
   double min_metric = 0.0, max_metric = 0.0;
   cv::minMaxLoc(model_depth_, &min_metric, &max_metric);
-  RCLCPP_DEBUG(
+  RCLCPP_INFO(
     rclcpp::get_logger("TensorRTDepthAnything"),
-    "Metric depth (model) min/max: %.6f / %.6f meters", min_metric, max_metric);
-  RCLCPP_DEBUG(
-    rclcpp::get_logger("TensorRTDepthAnything"),
-    "Focal length in pixels: %.6f (scale factor: %.6f)", focal_pixels, focal_scale);
+    "Metric depth (after scale) min/max: %.6f / %.6f m  focal_px: %.1f  focal_scale: %.4f",
+    min_metric, max_metric, focal_pixels, focal_scale);
 
   cv::resize(model_depth_, depth_image_, cv::Size(src_width_, src_height_), 0, 0, cv::INTER_CUBIC);
 
