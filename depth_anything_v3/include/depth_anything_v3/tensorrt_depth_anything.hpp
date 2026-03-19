@@ -115,6 +115,10 @@ private:
     const cv::Mat & rgb_image);
 public:
   void setSkyThreshold(float threshold) { sky_threshold_ = threshold; }
+  void setFreezeFrame(bool enable) { freeze_frame_ = enable; }
+  void setDisableSkyHandling(bool disable) { disable_sky_handling_ = disable; }
+  void setDisableEma(bool disable) { disable_ema_ = disable; }
+  bool runHashTest(int iterations);  // Run N identical inferences, print hash per run
 
   std::unique_ptr<tensorrt_common::TrtCommon> trt_common_;
 
@@ -156,6 +160,16 @@ public:
   float sky_threshold_{0.3f};
   const float sky_depth_cap_{200.0f};
   sensor_msgs::msg::PointCloud2 point_cloud_;
+
+  // Diagnostic: freeze-frame replay
+  bool freeze_frame_{false};
+  bool frame_frozen_{false};
+  std::vector<float> frozen_input_h_;
+
+  // Diagnostic: disable sky handling
+  bool disable_sky_handling_{false};
+  // Diagnostic: disable temporal EMA smoothing
+  bool disable_ema_{false};
 };
 
 }  // namespace depth_anything_v3

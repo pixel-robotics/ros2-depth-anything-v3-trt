@@ -76,8 +76,26 @@ DepthAnythingV3Node::DepthAnythingV3Node(const rclcpp::NodeOptions & node_option
   // Point cloud parameters
   node_param_.point_cloud_downsample_factor = declare_parameter<int>("point_cloud_downsample_factor", 10);
   node_param_.colorize_point_cloud = declare_parameter<bool>("colorize_point_cloud", true);
-  RCLCPP_INFO(get_logger(), "Point cloud downsampling factor: %d (publishing every %dth point)", 
+  // Diagnostic parameters
+  node_param_.debug_freeze_frame = declare_parameter<bool>("debug_freeze_frame", false);
+  node_param_.debug_disable_sky = declare_parameter<bool>("debug_disable_sky", false);
+  node_param_.debug_disable_ema = declare_parameter<bool>("debug_disable_ema", false);
+  node_param_.debug_hash_test_count = declare_parameter<int>("debug_hash_test_count", 0);
+
+  RCLCPP_INFO(get_logger(), "Point cloud downsampling factor: %d (publishing every %dth point)",
     node_param_.point_cloud_downsample_factor, node_param_.point_cloud_downsample_factor);
+  if (node_param_.debug_freeze_frame) {
+    RCLCPP_WARN(get_logger(), "[DIAG] Freeze-frame mode ENABLED — same input will be replayed every frame");
+  }
+  if (node_param_.debug_disable_sky) {
+    RCLCPP_WARN(get_logger(), "[DIAG] Sky handling DISABLED");
+  }
+  if (node_param_.debug_disable_ema) {
+    RCLCPP_WARN(get_logger(), "[DIAG] EMA temporal smoothing DISABLED");
+  }
+  if (node_param_.debug_hash_test_count > 0) {
+    RCLCPP_WARN(get_logger(), "[DIAG] Will run %d-iteration hash test on first frame", node_param_.debug_hash_test_count);
+  }
 
   RCLCPP_INFO(get_logger(), "Using model file: %s", node_param_.onnx_path.c_str());
 
@@ -137,7 +155,10 @@ DepthAnythingV3Node::DepthAnythingV3Node(const rclcpp::NodeOptions & node_option
     node_param_.onnx_path, node_param_.precision, build_config, use_gpu_preprocess,
     calibration_images, batch_config, workspace_size);
   tensorrt_depth_anything_->setSkyThreshold(static_cast<float>(node_param_.sky_threshold));
-    
+  tensorrt_depth_anything_->setFreezeFrame(node_param_.debug_freeze_frame);
+  tensorrt_depth_anything_->setDisableSkyHandling(node_param_.debug_disable_sky);
+  tensorrt_depth_anything_->setDisableEma(node_param_.debug_disable_ema);
+
   RCLCPP_INFO(get_logger(), "Finished initializing Depth Anything V3 TensorRT model");
 }
 
@@ -171,6 +192,20 @@ void DepthAnythingV3Node::onImageCameraInfo(
       img_mean[0], img_mean[1], img_mean[2]);
   }
 
+  // Diagnostic: log image stamp, camera_info stamp, fx, fy every frame
+  {
+    const auto & is = image_msg->header.stamp;
+    const auto & cs = camera_info_msg->header.stamp;
+    const double fx = camera_info_msg->k[0];
+    const double fy = camera_info_msg->k[4];
+    const double dt_ms = ((static_cast<int64_t>(is.sec) - cs.sec) * 1000.0) +
+                          ((static_cast<int64_t>(is.nanosec) - cs.nanosec) / 1e6);
+    RCLCPP_INFO(get_logger(),
+      "[DIAG] img_stamp=%d.%09d  cam_stamp=%d.%09d  dt=%.2fms  fx=%.4f  fy=%.4f  frame=%s",
+      is.sec, is.nanosec, cs.sec, cs.nanosec, dt_ms, fx, fy,
+      camera_info_msg->header.frame_id.c_str());
+  }
+
   std::vector<cv::Mat> input_images;
   input_images.push_back(in_image_ptr->image);
 
@@ -185,6 +220,12 @@ void DepthAnythingV3Node::onImageCameraInfo(
   }
 
   RCLCPP_DEBUG(this->get_logger(), "Inference completed in %.3f ms", inference_time_sec * 1000.0);
+
+  // Diagnostic: run hash test once on first successful frame
+  if (!hash_test_done_ && node_param_.debug_hash_test_count > 0) {
+    hash_test_done_ = true;
+    tensorrt_depth_anything_->runHashTest(node_param_.debug_hash_test_count);
+  }
 
   // Get depth image result
   const cv::Mat& depth_image = tensorrt_depth_anything_->getDepthImage();
@@ -279,10 +320,17 @@ rcl_interfaces::msg::SetParametersResult DepthAnythingV3Node::onSetParam(
     update_param(params, "sky_depth_cap", p.sky_depth_cap);
     update_param(params, "point_cloud_downsample_factor", p.point_cloud_downsample_factor);
     update_param(params, "colorize_point_cloud", p.colorize_point_cloud);
-    
+    update_param(params, "debug_freeze_frame", p.debug_freeze_frame);
+    update_param(params, "debug_disable_sky", p.debug_disable_sky);
+    update_param(params, "debug_disable_ema", p.debug_disable_ema);
+    update_param(params, "debug_hash_test_count", p.debug_hash_test_count);
+
     // Apply runtime-configurable model parameters
     if (tensorrt_depth_anything_) {
       tensorrt_depth_anything_->setSkyThreshold(static_cast<float>(p.sky_threshold));
+      tensorrt_depth_anything_->setFreezeFrame(p.debug_freeze_frame);
+      tensorrt_depth_anything_->setDisableSkyHandling(p.debug_disable_sky);
+      tensorrt_depth_anything_->setDisableEma(p.debug_disable_ema);
     }
   } catch (const rclcpp::exceptions::InvalidParameterTypeException & e) {
     result.successful = false;

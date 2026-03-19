@@ -55,6 +55,11 @@ public:
     double sky_depth_cap{};             // Cap for sky depth fill-in
     int point_cloud_downsample_factor{};  // Only publish every Nth point (1 = no downsampling)
     bool colorize_point_cloud{};  // Add RGB colors from input image to point cloud
+    // Diagnostic parameters
+    bool debug_freeze_frame{};          // Replay first preprocessed frame forever
+    bool debug_disable_sky{};           // Bypass sky fill logic
+    bool debug_disable_ema{};           // Bypass temporal smoothing
+    int debug_hash_test_count{};        // Run N identical inferences on first frame, print hash
   };
 
 private:
@@ -98,6 +103,7 @@ private:
   // Core
   std::shared_ptr<TensorRTDepthAnything> tensorrt_depth_anything_;
   bool is_initialized_ = false;
+  bool hash_test_done_ = false;  // Run hash test only once
 };
 
 } // namespace depth_anything_v3

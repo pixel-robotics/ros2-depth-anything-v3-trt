@@ -24,6 +24,7 @@
 #include <limits>
 #include <cstring>
 #include <iostream>
+#include <functional>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
@@ -315,9 +316,49 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
     }
   }
 
-  CHECK_CUDA_ERROR(cudaMemcpyAsync(
-    input_d_.get(), input_h_.data(), input_h_.size() * sizeof(float), cudaMemcpyHostToDevice,
-    *stream_));
+  // Diagnostic: log preprocessed input tensor stats
+  {
+    auto log = rclcpp::get_logger("TensorRTDepthAnything");
+    const size_t n = input_h_.size();
+    float imin = std::numeric_limits<float>::max();
+    float imax = std::numeric_limits<float>::lowest();
+    double isum = 0.0, isum2 = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+      const float v = input_h_[i];
+      if (v < imin) imin = v;
+      if (v > imax) imax = v;
+      isum += v;
+      isum2 += static_cast<double>(v) * v;
+    }
+    const double imean = n > 0 ? isum / n : 0.0;
+    const double istd = n > 1 ? std::sqrt((isum2 / n) - imean * imean) : 0.0;
+    RCLCPP_INFO(log,
+      "[DIAG] INPUT shape=1x3x%dx%d  min=%.6f  max=%.6f  mean=%.6f  std=%.6f  "
+      "first4=%.6f,%.6f,%.6f,%.6f",
+      input_height_, input_width_, imin, imax, imean, istd,
+      n > 0 ? input_h_[0] : 0.f, n > 1 ? input_h_[1] : 0.f,
+      n > 2 ? input_h_[2] : 0.f, n > 3 ? input_h_[3] : 0.f);
+  }
+
+  // Diagnostic: freeze-frame replay — capture first frame, replay on all subsequent
+  if (freeze_frame_) {
+    if (!frame_frozen_) {
+      frozen_input_h_ = input_h_;
+      frame_frozen_ = true;
+      RCLCPP_WARN(rclcpp::get_logger("TensorRTDepthAnything"),
+        "[DIAG] Freeze-frame: captured first preprocessed input (%zu floats)", input_h_.size());
+    } else {
+      RCLCPP_INFO(rclcpp::get_logger("TensorRTDepthAnything"),
+        "[DIAG] Freeze-frame: replaying frozen input");
+    }
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+      input_d_.get(), frozen_input_h_.data(), frozen_input_h_.size() * sizeof(float),
+      cudaMemcpyHostToDevice, *stream_));
+  } else {
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(
+      input_d_.get(), input_h_.data(), input_h_.size() * sizeof(float), cudaMemcpyHostToDevice,
+      *stream_));
+  }
 }
 
 bool TensorRTDepthAnything::infer()
@@ -391,15 +432,26 @@ void TensorRTDepthAnything::postprocess(
   cv::Mat sky_pred(height, width, CV_32FC1, const_cast<float *>(sky_h_.get()));
   sky_mask_ = sky_pred < sky_threshold_;
 
-  // Inspect raw output before scaling.
-  double raw_min = 0.0, raw_max = 0.0;
-  cv::minMaxLoc(model_depth_, &raw_min, &raw_max);
-  const double raw_mean = cv::mean(model_depth_)[0];
+  // --- STAGE 0: Raw TRT output ---
+  auto log = rclcpp::get_logger("TensorRTDepthAnything");
+  auto log_stage = [&](const char * stage, const cv::Mat & m) {
+    double smin = 0.0, smax = 0.0;
+    cv::minMaxLoc(m, &smin, &smax);
+    cv::Scalar mu, sd;
+    cv::meanStdDev(m, mu, sd);
+    // Compute p95 and p99 on a flat copy
+    std::vector<float> vals(m.begin<float>(), m.end<float>());
+    std::sort(vals.begin(), vals.end());
+    const float p95 = vals.empty() ? 0.f : vals[static_cast<size_t>(0.95 * (vals.size() - 1))];
+    const float p99 = vals.empty() ? 0.f : vals[static_cast<size_t>(0.99 * (vals.size() - 1))];
+    RCLCPP_INFO(log,
+      "[DIAG] %s  min=%.6f  max=%.6f  mean=%.6f  std=%.6f  p95=%.6f  p99=%.6f",
+      stage, smin, smax, mu[0], sd[0], p95, p99);
+  };
+
   const int sky_pixel_count = cv::countNonZero(~sky_mask_);
-  RCLCPP_INFO(
-    rclcpp::get_logger("TensorRTDepthAnything"),
-    "Raw net output min/max/mean: %.6f / %.6f / %.6f  sky_pixels: %d / %zu",
-    raw_min, raw_max, raw_mean, sky_pixel_count, plane_size);
+  RCLCPP_INFO(log, "[DIAG] sky_pixels: %d / %zu", sky_pixel_count, plane_size);
+  log_stage("after_trt_copy", model_depth_);
 
   // Clean and scale to metric depth.
   cv::Mat depth_map = model_depth_.clone();
@@ -412,8 +464,13 @@ void TensorRTDepthAnything::postprocess(
   const double focal_scale = focal_pixels > 0.0 ? focal_pixels / 300.0 : 1.0;
   depth_map *= static_cast<float>(focal_scale);
 
+  // --- STAGE 1: After focal scaling ---
+  RCLCPP_INFO(log, "[DIAG] fx=%.4f  fy=%.4f  focal_px=%.4f  focal_scale=%.6f",
+    fx, fy, focal_pixels, focal_scale);
+  log_stage("after_focal_scale", depth_map);
+
   // Handle sky: set sky pixels to max depth derived from non-sky regions.
-  if (!sky_mask_.empty()) {
+  if (!disable_sky_handling_ && !sky_mask_.empty()) {
     std::vector<float> valid_depths;
     valid_depths.reserve(plane_size);
     const uint8_t * mask_ptr = sky_mask_.ptr<uint8_t>(0);
@@ -438,16 +495,25 @@ void TensorRTDepthAnything::postprocess(
         }
         valid_depths.swap(sampled);
       }
-      const size_t idx = static_cast<size_t>(0.99 * (valid_depths.size() - 1));
-      std::nth_element(valid_depths.begin(), valid_depths.begin() + idx, valid_depths.end());
-      const float max_depth = std::min(valid_depths[idx], sky_depth_cap_);
+      const size_t p99_idx = static_cast<size_t>(0.99 * (valid_depths.size() - 1));
+      std::nth_element(valid_depths.begin(), valid_depths.begin() + p99_idx, valid_depths.end());
+      const float max_depth = std::min(valid_depths[p99_idx], sky_depth_cap_);
+      RCLCPP_INFO(log, "[DIAG] sky_fill_value=%.6f  sky_depth_cap=%.1f", max_depth, sky_depth_cap_);
       cv::Mat depth_map_reshaped(height, width, CV_32FC1, depth_map.data);
       depth_map_reshaped.setTo(max_depth, ~sky_mask_);
     }
+  } else if (disable_sky_handling_) {
+    RCLCPP_INFO(log, "[DIAG] Sky handling DISABLED");
   }
 
+  // --- STAGE 2: After sky handling ---
+  log_stage("after_sky_handling", depth_map);
+
   // Temporal smoothing (EMA) to stabilize depth across frames.
-  if (prev_depth_.empty() || prev_depth_.size() != depth_map.size()) {
+  if (disable_ema_) {
+    RCLCPP_INFO(log, "[DIAG] EMA smoothing DISABLED");
+    prev_depth_.release();
+  } else if (prev_depth_.empty() || prev_depth_.size() != depth_map.size()) {
     prev_depth_ = depth_map.clone();
   } else {
     constexpr float alpha = 0.3f;  // 0.0 = no change, 1.0 = no smoothing
@@ -455,17 +521,16 @@ void TensorRTDepthAnything::postprocess(
     prev_depth_ = depth_map.clone();
   }
 
+  // --- STAGE 3: After temporal smoothing ---
+  log_stage("after_ema_smooth", depth_map);
+
   // Persist scaled depth for point cloud generation at network resolution.
   model_depth_ = depth_map.clone();
 
-  double min_metric = 0.0, max_metric = 0.0;
-  cv::minMaxLoc(model_depth_, &min_metric, &max_metric);
-  RCLCPP_INFO(
-    rclcpp::get_logger("TensorRTDepthAnything"),
-    "Metric depth (after scale) min/max: %.6f / %.6f m  focal_px: %.1f  focal_scale: %.4f",
-    min_metric, max_metric, focal_pixels, focal_scale);
-
   cv::resize(model_depth_, depth_image_, cv::Size(src_width_, src_height_), 0, 0, cv::INTER_CUBIC);
+
+  // --- STAGE 4: After resize to original resolution ---
+  log_stage("after_resize", depth_image_);
 
 
   cv::Mat colorized = rgb_image;
@@ -527,6 +592,72 @@ const sensor_msgs::msg::PointCloud2& TensorRTDepthAnything::getPointCloud() cons
 void TensorRTDepthAnything::printProfiling()
 {
   trt_common_->printProfiling();
+}
+
+bool TensorRTDepthAnything::runHashTest(int iterations)
+{
+  auto log = rclcpp::get_logger("TensorRTDepthAnything");
+  RCLCPP_WARN(log, "[DIAG] === Hash test: running %d identical inferences ===", iterations);
+
+  if (input_h_.empty()) {
+    RCLCPP_ERROR(log, "[DIAG] Hash test: no input available (run at least one frame first)");
+    return false;
+  }
+
+  // Use whatever is currently in input_h_ (or frozen_input_h_)
+  const float * src = freeze_frame_ && frame_frozen_ ? frozen_input_h_.data() : input_h_.data();
+  const size_t src_size = freeze_frame_ && frame_frozen_ ? frozen_input_h_.size() : input_h_.size();
+
+  // Upload once
+  CHECK_CUDA_ERROR(cudaMemcpy(
+    input_d_.get(), src, src_size * sizeof(float), cudaMemcpyHostToDevice));
+
+  bool all_match = true;
+  size_t first_depth_hash = 0, first_sky_hash = 0;
+
+  for (int i = 0; i < iterations; ++i) {
+    // Re-upload same input each time to be safe
+    CHECK_CUDA_ERROR(cudaMemcpy(
+      input_d_.get(), src, src_size * sizeof(float), cudaMemcpyHostToDevice));
+
+    if (!infer()) {
+      RCLCPP_ERROR(log, "[DIAG] Hash test: inference failed at iteration %d", i);
+      return false;
+    }
+
+    // Hash the raw output buffers
+    size_t depth_hash = 0;
+    const auto * dp = reinterpret_cast<const char *>(depth_h_.get());
+    for (size_t j = 0; j < depth_elem_num_ * sizeof(float); ++j) {
+      depth_hash ^= std::hash<char>{}(dp[j]) + 0x9e3779b9 + (depth_hash << 6) + (depth_hash >> 2);
+    }
+
+    size_t sky_hash = 0;
+    if (sky_h_) {
+      const auto * sp = reinterpret_cast<const char *>(sky_h_.get());
+      for (size_t j = 0; j < sky_elem_num_ * sizeof(float); ++j) {
+        sky_hash ^= std::hash<char>{}(sp[j]) + 0x9e3779b9 + (sky_hash << 6) + (sky_hash >> 2);
+      }
+    }
+
+    RCLCPP_INFO(log, "[DIAG] Hash test iter %3d  depth_hash=%016zx  sky_hash=%016zx",
+      i, depth_hash, sky_hash);
+
+    if (i == 0) {
+      first_depth_hash = depth_hash;
+      first_sky_hash = sky_hash;
+    } else if (depth_hash != first_depth_hash || sky_hash != first_sky_hash) {
+      RCLCPP_ERROR(log, "[DIAG] Hash test: MISMATCH at iteration %d! Buffer/sync issue detected.", i);
+      all_match = false;
+    }
+  }
+
+  if (all_match) {
+    RCLCPP_WARN(log, "[DIAG] Hash test: ALL %d iterations MATCH — TRT output is deterministic", iterations);
+  } else {
+    RCLCPP_ERROR(log, "[DIAG] Hash test: MISMATCHES detected — suspect buffer/sync/runtime issue");
+  }
+  return all_match;
 }
 
 } // namespace depth_anything_v3
