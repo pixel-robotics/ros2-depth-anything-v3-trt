@@ -84,8 +84,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--opset",
         type=int,
-        default=20,
-        help="ONNX opset version to target.",
+        default=17,
+        help="ONNX opset version to target (17 recommended for TRT compatibility).",
     )
     parser.add_argument(
         "--device",
@@ -152,8 +152,8 @@ def export_onnx(
     param_count = sum(p.numel() for p in api_model.parameters())
     print(f"Model parameters: {param_count/1e6:.2f}M")
 
-    wrapper = DepthAnything3OnnxWrapper(api_model).to(device)
-    dummy_input = torch.zeros(batch_size, 3, height, width, device=device)
+    wrapper = DepthAnything3OnnxWrapper(api_model).to(device).float()
+    dummy_input = torch.zeros(batch_size, 3, height, width, device=device, dtype=torch.float32)
 
     with torch.no_grad():
         output = wrapper(dummy_input)

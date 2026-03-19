@@ -255,6 +255,10 @@ void TrtCommon::printNetworkInfo(const std::string & onnx_file_path)
   if (precision_ == "fp16" || precision_ == "int8") {
     config->setFlag(nvinfer1::BuilderFlag::kFP16);
   }
+  // Disable TF32 to ensure strict FP32 math — TF32 (10-bit mantissa) is enabled
+  // by default on Ampere+ GPUs and can cause numerical instability in some models.
+  config->clearFlag(nvinfer1::BuilderFlag::kTF32);
+
 #if (NV_TENSORRT_MAJOR * 1000) + (NV_TENSORRT_MINOR * 100) + NV_TENSOR_PATCH >= 8400
   config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, max_workspace_size_);
 #else
@@ -374,6 +378,10 @@ bool TrtCommon::buildEngineFromOnnx(
   if (precision_ == "fp16" || precision_ == "int8") {
     config->setFlag(nvinfer1::BuilderFlag::kFP16);
   }
+  // Disable TF32 to ensure strict FP32 math — TF32 (10-bit mantissa) is enabled
+  // by default on Ampere+ GPUs and can cause numerical instability in some models.
+  config->clearFlag(nvinfer1::BuilderFlag::kTF32);
+
 #if (NV_TENSORRT_MAJOR * 1000) + (NV_TENSORRT_MINOR * 100) + NV_TENSOR_PATCH >= 8400
   config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, max_workspace_size_);
 #else
