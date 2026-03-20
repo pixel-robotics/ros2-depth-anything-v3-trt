@@ -61,6 +61,7 @@ DepthAnythingV3Node::DepthAnythingV3Node(const rclcpp::NodeOptions & node_option
   node_param_.onnx_path = declare_parameter<std::string>(
     "onnx_path", "models/DA3METRIC-LARGE.fp16-batch1.engine");
   node_param_.precision = declare_parameter<std::string>("precision", "fp16");
+  node_param_.backend = declare_parameter<std::string>("backend", "tensorrt");
   
   // Debug parameters
   node_param_.enable_debug = declare_parameter<bool>("enable_debug", false);
@@ -151,9 +152,10 @@ DepthAnythingV3Node::DepthAnythingV3Node(const rclcpp::NodeOptions & node_option
   std::string calibration_images = "calibration_images.txt";
   const size_t workspace_size = (1 << 30);
 
+  RCLCPP_INFO(get_logger(), "Using backend: %s", node_param_.backend.c_str());
   tensorrt_depth_anything_ = std::make_shared<TensorRTDepthAnything>(
     node_param_.onnx_path, node_param_.precision, build_config, use_gpu_preprocess,
-    calibration_images, batch_config, workspace_size);
+    calibration_images, batch_config, workspace_size, node_param_.backend);
   tensorrt_depth_anything_->setSkyThreshold(static_cast<float>(node_param_.sky_threshold));
   tensorrt_depth_anything_->setFreezeFrame(node_param_.debug_freeze_frame);
   tensorrt_depth_anything_->setDisableSkyHandling(node_param_.debug_disable_sky);

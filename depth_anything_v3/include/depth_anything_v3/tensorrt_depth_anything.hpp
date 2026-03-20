@@ -25,6 +25,10 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 
+#ifdef USE_ONNXRUNTIME
+#include <onnxruntime_cxx_api.h>
+#endif
+
 namespace depth_anything_v3
 {
 using cuda_utils::CudaUniquePtr;
@@ -54,7 +58,8 @@ public:
     const tensorrt_common::BuildConfig build_config = tensorrt_common::BuildConfig(),
     const bool use_gpu_preprocess = false, std::string calibration_image_list_file = std::string(),
     const tensorrt_common::BatchConfig & batch_config = {1, 1, 1},
-    const size_t max_workspace_size = (1 << 30));
+    const size_t max_workspace_size = (1 << 30),
+    const std::string & backend = "tensorrt");
 
   /**
    * @brief run inference including pre-process and post-process
@@ -95,6 +100,13 @@ private:
    * @brief perform TensorRT inference
    */
   bool infer();
+
+#ifdef USE_ONNXRUNTIME
+  /**
+   * @brief perform ONNX Runtime inference (alternative to TRT)
+   */
+  bool inferOrt();
+#endif
 
   /**
    * @brief postprocess inference results to generate depth and point cloud
@@ -170,6 +182,17 @@ public:
   bool disable_sky_handling_{false};
   // Diagnostic: disable temporal EMA smoothing
   bool disable_ema_{false};
+
+  // Backend selection
+  std::string backend_{"tensorrt"};
+  std::string model_path_;
+
+#ifdef USE_ONNXRUNTIME
+  std::unique_ptr<Ort::Env> ort_env_;
+  std::unique_ptr<Ort::Session> ort_session_;
+  std::vector<float> ort_depth_out_;
+  std::vector<float> ort_sky_out_;
+#endif
 };
 
 }  // namespace depth_anything_v3

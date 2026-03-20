@@ -45,6 +45,7 @@ public:
   {
     std::string onnx_path{};
     std::string precision{};
+    std::string backend{};  // "tensorrt" or "onnxrt"
     bool enable_debug{};
     std::string debug_colormap{};
     std::string debug_filepath{};

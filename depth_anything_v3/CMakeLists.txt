@@ -54,6 +54,17 @@ find_library(TENSORRT_LIBRARY_ONNXPARSER nvonnxparser
 
 set(TENSORRT_LIBRARY ${TENSORRT_LIBRARY_INFER} ${TENSORRT_LIBRARY_INFER_PLUGIN} ${TENSORRT_LIBRARY_ONNXPARSER})
 
+# ONNX Runtime backend (optional)
+find_library(ONNXRUNTIME_LIBRARY onnxruntime HINTS /usr/local/lib)
+find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h HINTS /usr/local/include)
+if(ONNXRUNTIME_LIBRARY AND ONNXRUNTIME_INCLUDE_DIR)
+  message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIBRARY}")
+  set(USE_ONNXRUNTIME ON)
+else()
+  message(STATUS "ONNX Runtime not found, building without ORT backend")
+  set(USE_ONNXRUNTIME OFF)
+endif()
+
 # Common utilities are included in the include/ and src/ directories
 
 # Include directories
@@ -79,6 +90,12 @@ target_link_libraries(tensorrt_depth_anything
   ${CUDA_curand_LIBRARY}
   ${CUDA_cusparse_LIBRARY}
 )
+
+if(USE_ONNXRUNTIME)
+  target_compile_definitions(tensorrt_depth_anything PUBLIC USE_ONNXRUNTIME)
+  target_include_directories(tensorrt_depth_anything PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+  target_link_libraries(tensorrt_depth_anything ${ONNXRUNTIME_LIBRARY})
+endif()
 
 ament_target_dependencies(tensorrt_depth_anything
   rclcpp
@@ -146,12 +163,18 @@ target_link_libraries(generate_engines
   ${CUDA_cusparse_LIBRARY}
 )
 
+# Standalone TRT vs ONNX comparison tool
+add_executable(compare_trt src/compare_trt.cpp)
+target_include_directories(compare_trt PRIVATE ${TENSORRT_INCLUDE_DIR} ${CUDA_INCLUDE_DIRS})
+target_link_libraries(compare_trt ${TENSORRT_LIBRARY} ${CUDA_LIBRARIES})
+
 # Install targets
 install(TARGETS
   tensorrt_depth_anything
   depth_anything_v3_node
   depth_anything_v3_main
   generate_engines
+  compare_trt
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

@@ -134,14 +134,65 @@ TensorRTDepthAnything::TensorRTDepthAnything(
   const std::string & model_path, const std::string & precision,
   tensorrt_common::BuildConfig build_config, const bool use_gpu_preprocess,
   std::string /* calibration_image_list_path */, const tensorrt_common::BatchConfig & batch_config,
-  const size_t max_workspace_size)
-: batch_size_(batch_config[2]), use_gpu_preprocess_(use_gpu_preprocess)
+  const size_t max_workspace_size, const std::string & backend)
+: batch_size_(batch_config[2]), use_gpu_preprocess_(use_gpu_preprocess),
+  backend_(backend), model_path_(model_path)
 {
   src_width_ = -1;
   src_height_ = -1;
 
   if (!fs::exists(model_path)) {
     throw std::runtime_error("Model file does not exist: " + model_path);
+  }
+
+  auto log = rclcpp::get_logger("TensorRTDepthAnything");
+
+#ifdef USE_ONNXRUNTIME
+  if (backend_ == "onnxrt") {
+    ort_env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "DepthAnythingV3");
+    Ort::SessionOptions opts;
+    opts.SetIntraOpNumThreads(4);
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    // Try CUDA provider first, fall back to CPU
+    try {
+      OrtCUDAProviderOptions cuda_opts;
+      cuda_opts.device_id = 0;
+      opts.AppendExecutionProvider_CUDA(cuda_opts);
+      RCLCPP_INFO(log, "Using ONNX Runtime backend with CUDA provider");
+    } catch (const Ort::Exception & e) {
+      RCLCPP_WARN(log, "CUDA provider not available (%s), using CPU", e.what());
+    }
+
+    ort_session_ = std::make_unique<Ort::Session>(*ort_env_, model_path.c_str(), opts);
+
+    // Query input shape
+    auto input_info = ort_session_->GetInputTypeInfo(0);
+    auto tensor_info = input_info.GetTensorTypeAndShapeInfo();
+    auto shape = tensor_info.GetShape();  // [1, 3, H, W]
+    input_height_ = static_cast<int>(shape[2]);
+    input_width_ = static_cast<int>(shape[3]);
+    const int input_channels = static_cast<int>(shape[1]);
+
+    RCLCPP_INFO(log, "ORT model input dims: [1, %d, %d, %d] (N, C, H, W)",
+      input_channels, input_height_, input_width_);
+
+    // Allocate host buffers (no GPU needed for ORT CPU)
+    const size_t input_elem_num = batch_size_ * input_channels * input_height_ * input_width_;
+    input_h_.resize(input_elem_num);
+
+    depth_elem_num_ = batch_size_ * 1 * input_height_ * input_width_;
+    sky_elem_num_ = depth_elem_num_;
+    depth_h_ = cuda_utils::make_unique_host<float[]>(depth_elem_num_, cudaHostAllocDefault);
+    sky_h_ = cuda_utils::make_unique_host<float[]>(sky_elem_num_, cudaHostAllocDefault);
+
+    return;
+  }
+#endif
+
+  if (backend_ != "tensorrt") {
+    RCLCPP_WARN(log, "Unknown backend '%s', falling back to tensorrt", backend_.c_str());
+    backend_ = "tensorrt";
   }
 
   // Initialize TensorRT common
@@ -162,7 +213,6 @@ TensorRTDepthAnything::TensorRTDepthAnything(
     }
   }
   if (depth_elem_num_ == 0) {
-    // Fallback to the first output binding if names are unavailable
     const auto dims = trt_common_->getBindingDimensions(1);
     depth_elem_num_ = volumeFromDims(dims, batch_size_);
   }
@@ -181,7 +231,7 @@ TensorRTDepthAnything::TensorRTDepthAnything(
   const int input_channels = input_dims.d[1];
   input_height_ = input_dims.d[2];
   input_width_ = input_dims.d[3];
-  RCLCPP_INFO(rclcpp::get_logger("TensorRTDepthAnything"),
+  RCLCPP_INFO(log,
     "Model input dims: [%d, %d, %d, %d] (N, C, H, W)",
     input_dims.d[0], input_channels, input_height_, input_width_);
 
@@ -189,7 +239,6 @@ TensorRTDepthAnything::TensorRTDepthAnything(
   const size_t input_elem_num = batch_size_ * input_channels * input_height_ * input_width_;
   input_d_ = cuda_utils::make_unique<float[]>(input_elem_num);
   input_h_.resize(input_elem_num);
-
 }
 
 void TensorRTDepthAnything::initPreprocessBuffer(int width, int height)
@@ -229,7 +278,16 @@ bool TensorRTDepthAnything::doInference(
   preprocess(images);
 
   // Run inference
-  if (!infer()) {
+  bool infer_ok = false;
+#ifdef USE_ONNXRUNTIME
+  if (backend_ == "onnxrt") {
+    infer_ok = inferOrt();
+  } else
+#endif
+  {
+    infer_ok = infer();
+  }
+  if (!infer_ok) {
     return false;
   }
 
@@ -243,15 +301,19 @@ bool TensorRTDepthAnything::doInference(
 void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
 {
   const auto batch_size = images.size();
-  auto input_dims = trt_common_->getBindingDimensions(0);
-  if (input_dims.d[0] == -1) {
-    input_dims.d[0] = batch_size_;
-  }
-  trt_common_->setBindingDimensions(0, input_dims);
+  int input_chan = 3;
 
-  input_height_ = input_dims.d[2];
-  input_width_ = input_dims.d[3];
-  const int input_chan = input_dims.d[1];
+  if (trt_common_) {
+    auto input_dims = trt_common_->getBindingDimensions(0);
+    if (input_dims.d[0] == -1) {
+      input_dims.d[0] = batch_size_;
+    }
+    trt_common_->setBindingDimensions(0, input_dims);
+    input_height_ = input_dims.d[2];
+    input_width_ = input_dims.d[3];
+    input_chan = input_dims.d[1];
+  }
+
   scale_x_ = static_cast<double>(input_width_) / static_cast<double>(src_width_);
   scale_y_ = static_cast<double>(input_height_) / static_cast<double>(src_height_);
 
@@ -296,22 +358,24 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
     }
   }
 
-  auto * engine = trt_common_->getEngine();
-  for (int i = 0; i < trt_common_->getNbIOTensors(); ++i) {
-    const char * name = engine->getIOTensorName(i);
-    const auto dims = trt_common_->getBindingDimensions(i);
-    const size_t required_output_elems = volumeFromDims(dims, batch_size_);
-    if (name && std::string(name) == "depth") {
-      if (required_output_elems != depth_elem_num_) {
-        depth_elem_num_ = required_output_elems;
-        depth_d_ = cuda_utils::make_unique<float[]>(depth_elem_num_);
-        depth_h_ = cuda_utils::make_unique_host<float[]>(depth_elem_num_, cudaHostAllocDefault);
-      }
-    } else if (name && std::string(name) == "sky") {
-      if (required_output_elems != sky_elem_num_) {
-        sky_elem_num_ = required_output_elems;
-        sky_d_ = cuda_utils::make_unique<float[]>(sky_elem_num_);
-        sky_h_ = cuda_utils::make_unique_host<float[]>(sky_elem_num_, cudaHostAllocDefault);
+  if (trt_common_) {
+    auto * engine = trt_common_->getEngine();
+    for (int i = 0; i < trt_common_->getNbIOTensors(); ++i) {
+      const char * name = engine->getIOTensorName(i);
+      const auto dims = trt_common_->getBindingDimensions(i);
+      const size_t required_output_elems = volumeFromDims(dims, batch_size_);
+      if (name && std::string(name) == "depth") {
+        if (required_output_elems != depth_elem_num_) {
+          depth_elem_num_ = required_output_elems;
+          depth_d_ = cuda_utils::make_unique<float[]>(depth_elem_num_);
+          depth_h_ = cuda_utils::make_unique_host<float[]>(depth_elem_num_, cudaHostAllocDefault);
+        }
+      } else if (name && std::string(name) == "sky") {
+        if (required_output_elems != sky_elem_num_) {
+          sky_elem_num_ = required_output_elems;
+          sky_d_ = cuda_utils::make_unique<float[]>(sky_elem_num_);
+          sky_h_ = cuda_utils::make_unique_host<float[]>(sky_elem_num_, cudaHostAllocDefault);
+        }
       }
     }
   }
@@ -351,13 +415,17 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
       RCLCPP_INFO(rclcpp::get_logger("TensorRTDepthAnything"),
         "[DIAG] Freeze-frame: replaying frozen input");
     }
-    CHECK_CUDA_ERROR(cudaMemcpyAsync(
-      input_d_.get(), frozen_input_h_.data(), frozen_input_h_.size() * sizeof(float),
-      cudaMemcpyHostToDevice, *stream_));
+    if (input_d_) {
+      CHECK_CUDA_ERROR(cudaMemcpyAsync(
+        input_d_.get(), frozen_input_h_.data(), frozen_input_h_.size() * sizeof(float),
+        cudaMemcpyHostToDevice, *stream_));
+    }
   } else {
-    CHECK_CUDA_ERROR(cudaMemcpyAsync(
-      input_d_.get(), input_h_.data(), input_h_.size() * sizeof(float), cudaMemcpyHostToDevice,
-      *stream_));
+    if (input_d_) {
+      CHECK_CUDA_ERROR(cudaMemcpyAsync(
+        input_d_.get(), input_h_.data(), input_h_.size() * sizeof(float), cudaMemcpyHostToDevice,
+        *stream_));
+    }
   }
 }
 
@@ -414,12 +482,55 @@ bool TensorRTDepthAnything::infer()
   return true;
 }
 
+#ifdef USE_ONNXRUNTIME
+bool TensorRTDepthAnything::inferOrt()
+{
+  // Create input tensor from input_h_
+  std::array<int64_t, 4> input_shape = {1, 3, input_height_, input_width_};
+  auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  auto input_tensor = Ort::Value::CreateTensor<float>(
+    memory_info, input_h_.data(), input_h_.size(), input_shape.data(), input_shape.size());
+
+  const char * input_names[] = {"image"};
+  const char * output_names[] = {"depth", "sky"};
+
+  auto outputs = ort_session_->Run(
+    Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 2);
+
+  // Copy depth output to depth_h_
+  const float * depth_data = outputs[0].GetTensorData<float>();
+  auto depth_info = outputs[0].GetTensorTypeAndShapeInfo();
+  size_t depth_count = depth_info.GetElementCount();
+  if (depth_count != depth_elem_num_) {
+    depth_elem_num_ = depth_count;
+    depth_h_ = cuda_utils::make_unique_host<float[]>(depth_elem_num_, cudaHostAllocDefault);
+  }
+  std::memcpy(depth_h_.get(), depth_data, depth_elem_num_ * sizeof(float));
+
+  // Copy sky output to sky_h_
+  const float * sky_data = outputs[1].GetTensorData<float>();
+  auto sky_info = outputs[1].GetTensorTypeAndShapeInfo();
+  size_t sky_count = sky_info.GetElementCount();
+  if (sky_count != sky_elem_num_) {
+    sky_elem_num_ = sky_count;
+    sky_h_ = cuda_utils::make_unique_host<float[]>(sky_elem_num_, cudaHostAllocDefault);
+  }
+  std::memcpy(sky_h_.get(), sky_data, sky_elem_num_ * sizeof(float));
+
+  return true;
+}
+#endif
+
 void TensorRTDepthAnything::postprocess(
   const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor, const cv::Mat & rgb_image)
 {
-  const auto output_dims = trt_common_->getBindingDimensions(1);
-  const int height = output_dims.nbDims > 2 ? output_dims.d[2] : input_height_;
-  const int width = output_dims.nbDims > 3 ? output_dims.d[3] : input_width_;
+  int height = input_height_;
+  int width = input_width_;
+  if (trt_common_) {
+    const auto output_dims = trt_common_->getBindingDimensions(1);
+    height = output_dims.nbDims > 2 ? output_dims.d[2] : input_height_;
+    width = output_dims.nbDims > 3 ? output_dims.d[3] : input_width_;
+  }
 
   // Use depth output directly
   const float * depth_ptr = depth_h_.get();
