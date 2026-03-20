@@ -56,7 +56,9 @@ set(TENSORRT_LIBRARY ${TENSORRT_LIBRARY_INFER} ${TENSORRT_LIBRARY_INFER_PLUGIN} 
 
 # ONNX Runtime backend (optional)
 find_library(ONNXRUNTIME_LIBRARY onnxruntime HINTS /usr/local/lib)
-find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h HINTS /usr/local/include)
+find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+  HINTS /usr/local/include
+  PATH_SUFFIXES onnxruntime/core/session)
 if(ONNXRUNTIME_LIBRARY AND ONNXRUNTIME_INCLUDE_DIR)
   message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIBRARY}")
   set(USE_ONNXRUNTIME ON)
@@ -93,7 +95,7 @@ target_link_libraries(tensorrt_depth_anything
 
 if(USE_ONNXRUNTIME)
   target_compile_definitions(tensorrt_depth_anything PUBLIC USE_ONNXRUNTIME)
-  target_include_directories(tensorrt_depth_anything PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+  target_include_directories(tensorrt_depth_anything PUBLIC ${ONNXRUNTIME_INCLUDE_DIR})
   target_link_libraries(tensorrt_depth_anything ${ONNXRUNTIME_LIBRARY})
 endif()
 
