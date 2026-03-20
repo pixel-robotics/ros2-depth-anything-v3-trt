@@ -50,28 +50,23 @@ public:
     std::string debug_colormap{};
     std::string debug_filepath{};
     bool write_colormap{};
-    double debug_colormap_min_depth{};  // Minimum depth value for colormap visualization
-    double debug_colormap_max_depth{};  // Maximum depth value for colormap visualization
-    double sky_threshold{};             // Threshold for sky classification
-    double sky_depth_cap{};             // Cap for sky depth fill-in
-    int point_cloud_downsample_factor{};  // Only publish every Nth point (1 = no downsampling)
-    bool colorize_point_cloud{};  // Add RGB colors from input image to point cloud
-    // Diagnostic parameters
-    bool debug_freeze_frame{};          // Replay first preprocessed frame forever
-    bool debug_disable_sky{};           // Bypass sky fill logic
-    bool debug_disable_ema{};           // Bypass temporal smoothing
-    int debug_hash_test_count{};        // Run N identical inferences on first frame, print hash
+    double debug_colormap_min_depth{};
+    double debug_colormap_max_depth{};
+    double sky_threshold{};
+    double sky_depth_cap{};
+    int point_cloud_downsample_factor{};
+    bool colorize_point_cloud{};
   };
 
 private:
   // Synchronized subscribers for image (via image_transport) and camera_info
   image_transport::SubscriberFilter sub_image_;
   std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>> sub_camera_info_;
-  
+
   // Use approximate time synchronizer for more flexible timing
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::CameraInfo> ApproxSyncPolicy;
   std::shared_ptr<message_filters::Synchronizer<ApproxSyncPolicy>> sync_;
-  
+
   // Debug subscribers (separate from sync)
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr debug_image_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr debug_camera_info_sub_;
@@ -80,7 +75,7 @@ private:
   void onImageCameraInfo(
     const sensor_msgs::msg::Image::ConstSharedPtr & image_msg,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg);
-    
+
   // Debug callbacks for individual topics
   void onImageDebug(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
   void onCameraInfoDebug(const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg);
@@ -104,7 +99,6 @@ private:
   // Core
   std::shared_ptr<TensorRTDepthAnything> tensorrt_depth_anything_;
   bool is_initialized_ = false;
-  bool hash_test_done_ = false;  // Run hash test only once
 };
 
 } // namespace depth_anything_v3

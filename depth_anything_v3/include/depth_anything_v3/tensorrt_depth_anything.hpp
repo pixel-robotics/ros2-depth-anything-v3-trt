@@ -38,21 +38,11 @@ using cuda_utils::StreamUniquePtr;
 
 /**
  * @class TensorRTDepthAnything
- * @brief TensorRT DepthAnythingV3 wrapper for depth estimation and point cloud generation
+ * @brief TensorRT/ONNX Runtime DepthAnythingV3 wrapper for depth estimation and point cloud generation
  */
 class TensorRTDepthAnything
 {
 public:
-  /**
-   * @brief Construct TensorRTDepthAnything.
-   * @param[in] model_path ONNX model_path
-   * @param[in] precision precision for inference
-   * @param[in] build_config configuration including precision, calibration method, etc.
-   * @param[in] use_gpu_preprocess whether use cuda gpu for preprocessing
-   * @param[in] calibration_image_list_file path for calibration files
-   * @param[in] batch_config configuration for batched execution
-   * @param[in] max_workspace_size maximum workspace for building TensorRT engine
-   */
   TensorRTDepthAnything(
     const std::string & model_path, const std::string & precision,
     const tensorrt_common::BuildConfig build_config = tensorrt_common::BuildConfig(),
@@ -61,76 +51,32 @@ public:
     const size_t max_workspace_size = (1 << 30),
     const std::string & backend = "tensorrt");
 
-  /**
-   * @brief run inference including pre-process and post-process
-   * @param[in] images batched images
-   * @param[in] camera_info camera calibration info for point cloud generation
-   * @param[in] downsample_factor only publish every Nth point (1 = no downsampling)
-   * @param[in] colorize_pointcloud whether to colorize point cloud with RGB
-   */
   bool doInference(const std::vector<cv::Mat> & images, const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, bool colorize_pointcloud = false);
 
   void initPreprocessBuffer(int width, int height);
 
-  /**
-   * @brief output TensorRT profiles for each layer
-   */
   void printProfiling(void);
 
-  /**
-   * @brief Get the depth image result
-   * @return depth image as cv::Mat (const reference)
-   */
   const cv::Mat& getDepthImage() const;
 
-  /**
-   * @brief Get the point cloud result
-   * @return point cloud as ROS2 PointCloud2 message (const reference)
-   */
   const sensor_msgs::msg::PointCloud2& getPointCloud() const;
 
 private:
-  /**
-   * @brief run preprocess including resizing, letterbox, NHWC2NCHW and toFloat on CPU
-   * @param[in] images batching images
-   */
   void preprocess(const std::vector<cv::Mat> & images);
 
-  /**
-   * @brief perform TensorRT inference
-   */
   bool infer();
 
 #ifdef USE_ONNXRUNTIME
-  /**
-   * @brief perform ONNX Runtime inference (alternative to TRT)
-   */
   bool inferOrt();
 #endif
 
-  /**
-   * @brief postprocess inference results to generate depth and point cloud
-   * @param[in] camera_info camera calibration for point cloud generation
-   * @param[in] downsample_factor downsampling factor for point cloud
-   * @param[in] rgb_image optional RGB image for colorizing point cloud
-   */
   void postprocess(const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, const cv::Mat & rgb_image = cv::Mat());
 
-  /**
-   * @brief Build point cloud from depth image using camera intrinsics
-   * @param[in] camera_info camera calibration parameters
-   * @param[in] downsample_factor only publish every Nth point
-   * @param[in] rgb_image optional RGB image for colorizing point cloud
-   */
   void buildPointCloud(
     const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor,
     const cv::Mat & rgb_image);
 public:
   void setSkyThreshold(float threshold) { sky_threshold_ = threshold; }
-  void setFreezeFrame(bool enable) { freeze_frame_ = enable; }
-  void setDisableSkyHandling(bool disable) { disable_sky_handling_ = disable; }
-  void setDisableEma(bool disable) { disable_ema_ = disable; }
-  bool runHashTest(int iterations);  // Run N identical inferences, print hash per run
 
   std::unique_ptr<tensorrt_common::TrtCommon> trt_common_;
 
@@ -149,7 +95,6 @@ public:
   std::vector<CudaUniquePtr<float[]>> extra_output_buffers_;
   cv::Mat model_depth_;
   cv::Mat sky_mask_;
-  cv::Mat prev_depth_;  // for temporal EMA smoothing
 
   StreamUniquePtr stream_{makeCudaStream()};
 
@@ -173,16 +118,6 @@ public:
   const float sky_depth_cap_{200.0f};
   sensor_msgs::msg::PointCloud2 point_cloud_;
 
-  // Diagnostic: freeze-frame replay
-  bool freeze_frame_{false};
-  bool frame_frozen_{false};
-  std::vector<float> frozen_input_h_;
-
-  // Diagnostic: disable sky handling
-  bool disable_sky_handling_{false};
-  // Diagnostic: disable temporal EMA smoothing
-  bool disable_ema_{false};
-
   // Backend selection
   std::string backend_{"tensorrt"};
   std::string model_path_;
@@ -190,8 +125,6 @@ public:
 #ifdef USE_ONNXRUNTIME
   std::unique_ptr<Ort::Env> ort_env_;
   std::unique_ptr<Ort::Session> ort_session_;
-  std::vector<float> ort_depth_out_;
-  std::vector<float> ort_sky_out_;
 #endif
 };
 
