@@ -20,3 +20,15 @@ depth_anything_v3:
 
     # Point cloud colorization with RGB from input image
     colorize_point_cloud: true  # Set to true to publish RGB point cloud instead of XYZ only
+
+    # Normal map visualization (surface normals colored by camera-facing angle)
+    enable_normal_map: true  # Blue = facing camera, Red = not facing camera
+    normal_map_max_depth: 1.6  # Discard depths beyond this (meters) before computing normals (0 = no filtering)
+    normal_map_blur_size: 15   # Gaussian blur kernel size before normal computation (odd, larger = smoother for flat surfaces)
+    normal_map_facing_threshold: 0.9  # Facing value threshold [0-1] for mask (higher = stricter, only very camera-facing surfaces)
+    normal_map_morph_size: 7          # Morphological open/close kernel size for mask denoising (0 = disabled, larger = more aggressive)
+
+    # Known plane projection: project pixels onto x=0 plane in this TF frame
+    # When enabled, the point cloud is built by ray-plane intersection instead of depth values
+    use_plane_projection: true
+    known_plane_frame: "known_plane"

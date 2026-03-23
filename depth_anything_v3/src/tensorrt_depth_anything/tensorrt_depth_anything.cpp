@@ -28,6 +28,8 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 #include "depth_anything_v3/tensorrt_depth_anything.hpp"
 #include "cuda_utils/cuda_check_error.hpp"
@@ -558,7 +560,6 @@ void TensorRTDepthAnything::postprocess(
 
   cv::resize(model_depth_, depth_image_, cv::Size(src_width_, src_height_), 0, 0, cv::INTER_CUBIC);
 
-
   cv::Mat colorized = rgb_image;
   if (!colorized.empty() &&
       (colorized.rows != depth_image_.rows || colorized.cols != depth_image_.cols)) {
@@ -573,7 +574,6 @@ void TensorRTDepthAnything::buildPointCloud(
   const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor,
   const cv::Mat & rgb_image)
 {
-
   // Resize color to match model output if provided.
   cv::Mat color;
   if (!rgb_image.empty()) {
@@ -604,6 +604,117 @@ void TensorRTDepthAnything::buildPointCloud(
 
   // Preserve original timestamp
   point_cloud_.header.stamp = camera_info.header.stamp;
+}
+
+void TensorRTDepthAnything::buildPlaneProjectionPointCloud(
+  const sensor_msgs::msg::CameraInfo & camera_info,
+  const geometry_msgs::msg::TransformStamped & camera_to_plane_tf,
+  int downsample_factor,
+  const cv::Mat & rgb_image,
+  const cv::Mat & mask)
+{
+  // Transform from camera optical frame to known_plane frame: [R | t]
+  const auto & trans = camera_to_plane_tf.transform.translation;
+  const auto & rot_q = camera_to_plane_tf.transform.rotation;
+
+  tf2::Quaternion quat(rot_q.x, rot_q.y, rot_q.z, rot_q.w);
+  tf2::Matrix3x3 R(quat);
+
+  // The known plane is x=0 in the known_plane frame.
+  // For pixel (u,v), ray in camera frame: P(s) = s * d, where d = ((u-cx)/fx, (v-cy)/fy, 1)
+  // In known_plane frame: P_kp = R * (s*d) + t
+  // Plane constraint P_kp.x = 0:
+  //   s * (R[0][0]*dx + R[0][1]*dy + R[0][2]) + tx = 0
+  //   s = -tx / (R[0][0]*dx + R[0][1]*dy + R[0][2])
+  // The 3D point in camera frame is then (s*dx, s*dy, s).
+
+  const double R00 = R[0][0], R01 = R[0][1], R02 = R[0][2];
+  const double tx = trans.x;
+
+  const double fx = camera_info.k[0];
+  const double fy = camera_info.k[4];
+  const double cx = camera_info.k[2];
+  const double cy = camera_info.k[5];
+
+  const int height = static_cast<int>(camera_info.height);
+  const int width = static_cast<int>(camera_info.width);
+
+  const std::string frame_id =
+    camera_info.header.frame_id.empty() ? "camera_link" : camera_info.header.frame_id;
+
+  const int ds_height = (height + downsample_factor - 1) / downsample_factor;
+  const int ds_width = (width + downsample_factor - 1) / downsample_factor;
+
+  point_cloud_.header.frame_id = frame_id;
+  point_cloud_.header.stamp = camera_info.header.stamp;
+  point_cloud_.height = ds_height;
+  point_cloud_.width = ds_width;
+  point_cloud_.is_dense = false;
+  point_cloud_.is_bigendian = false;
+
+  sensor_msgs::PointCloud2Modifier modifier(point_cloud_);
+  const bool has_color = !rgb_image.empty();
+  if (has_color) {
+    modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
+  } else {
+    modifier.setPointCloud2FieldsByString(1, "xyz");
+  }
+
+  sensor_msgs::PointCloud2Iterator<float> iter_x(point_cloud_, "x");
+  sensor_msgs::PointCloud2Iterator<float> iter_y(point_cloud_, "y");
+  sensor_msgs::PointCloud2Iterator<float> iter_z(point_cloud_, "z");
+  std::unique_ptr<sensor_msgs::PointCloud2Iterator<uint8_t>> iter_r, iter_g, iter_b;
+  if (has_color) {
+    iter_r = std::make_unique<sensor_msgs::PointCloud2Iterator<uint8_t>>(point_cloud_, "r");
+    iter_g = std::make_unique<sensor_msgs::PointCloud2Iterator<uint8_t>>(point_cloud_, "g");
+    iter_b = std::make_unique<sensor_msgs::PointCloud2Iterator<uint8_t>>(point_cloud_, "b");
+  }
+
+  const float bad_point = std::numeric_limits<float>::quiet_NaN();
+  const bool use_mask = !mask.empty();
+
+  for (int v = 0; v < height; v += downsample_factor) {
+    for (int u = 0; u < width; u += downsample_factor) {
+      // Skip pixels not in the mask
+      if (use_mask && mask.at<uint8_t>(v, u) == 0) {
+        *iter_x = *iter_y = *iter_z = bad_point;
+        if (has_color) { **iter_r = **iter_g = **iter_b = 0; }
+        ++iter_x; ++iter_y; ++iter_z;
+        if (has_color) { ++(*iter_r); ++(*iter_g); ++(*iter_b); }
+        continue;
+      }
+
+      const double dx = (u - cx) / fx;
+      const double dy = (v - cy) / fy;
+
+      const double denom = R00 * dx + R01 * dy + R02;
+
+      bool valid = false;
+      if (std::abs(denom) > 1e-9) {
+        const double s = -tx / denom;
+        if (s > 0.0) {
+          *iter_x = static_cast<float>(s * dx);
+          *iter_y = static_cast<float>(s * dy);
+          *iter_z = static_cast<float>(s);
+          if (has_color) {
+            const cv::Vec3b bgr = rgb_image.at<cv::Vec3b>(v, u);
+            **iter_r = bgr[2];
+            **iter_g = bgr[1];
+            **iter_b = bgr[0];
+          }
+          valid = true;
+        }
+      }
+
+      if (!valid) {
+        *iter_x = *iter_y = *iter_z = bad_point;
+        if (has_color) { **iter_r = **iter_g = **iter_b = 0; }
+      }
+
+      ++iter_x; ++iter_y; ++iter_z;
+      if (has_color) { ++(*iter_r); ++(*iter_g); ++(*iter_b); }
+    }
+  }
 }
 const cv::Mat& TensorRTDepthAnything::getDepthImage() const
 {

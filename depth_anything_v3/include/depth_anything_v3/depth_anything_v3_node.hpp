@@ -31,6 +31,8 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 #include "depth_anything_v3/tensorrt_depth_anything.hpp"
 
@@ -56,6 +58,13 @@ public:
     double sky_depth_cap{};
     int point_cloud_downsample_factor{};
     bool colorize_point_cloud{};
+    bool enable_normal_map{};
+    double normal_map_max_depth{};
+    int normal_map_blur_size{};
+    double normal_map_facing_threshold{};
+    int normal_map_morph_size{};
+    bool use_plane_projection{};
+    std::string known_plane_frame{};
   };
 
 private:
@@ -84,6 +93,8 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_depth_image_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_point_cloud_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_depth_image_debug_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_normal_map_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_facing_mask_;
 
   // Helper methods
   int getColorMapType(const std::string& colormap_name);
@@ -95,6 +106,10 @@ private:
 
   // Parameter
   NodeParam node_param_{};
+
+  // TF2
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // Core
   std::shared_ptr<TensorRTDepthAnything> tensorrt_depth_anything_;

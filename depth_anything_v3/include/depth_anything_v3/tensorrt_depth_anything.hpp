@@ -24,6 +24,7 @@
 #include <vector>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 
 #ifdef USE_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
@@ -52,6 +53,13 @@ public:
     const std::string & backend = "tensorrt");
 
   bool doInference(const std::vector<cv::Mat> & images, const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, bool colorize_pointcloud = false);
+
+  void buildPlaneProjectionPointCloud(
+    const sensor_msgs::msg::CameraInfo & camera_info,
+    const geometry_msgs::msg::TransformStamped & camera_to_plane_tf,
+    int downsample_factor,
+    const cv::Mat & rgb_image = cv::Mat(),
+    const cv::Mat & mask = cv::Mat());
 
   void initPreprocessBuffer(int width, int height);
 

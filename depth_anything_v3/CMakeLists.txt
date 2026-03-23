@@ -32,6 +32,9 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(OpenCV 4 REQUIRED)
 
 # Find CUDA
@@ -101,6 +104,8 @@ ament_target_dependencies(tensorrt_depth_anything
   rclcpp
   sensor_msgs
   cv_bridge
+  tf2
+  geometry_msgs
 )
 
 # Create Depth Anything v3 node library
@@ -120,6 +125,9 @@ ament_target_dependencies(depth_anything_v3_node
   cv_bridge
   image_transport
   message_filters
+  tf2
+  tf2_ros
+  geometry_msgs
 )
 
 # Register component
