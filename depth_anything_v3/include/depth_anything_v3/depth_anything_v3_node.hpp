@@ -22,6 +22,7 @@
 #endif
 #include <memory>
 #include <opencv2/opencv.hpp>
+#include <optional>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -59,6 +60,10 @@ public:
   };
 
 private:
+  // Stamp of the last processed frame — used to skip a sleeping camera
+  // driver's republished frames (identical stamp).
+  std::optional<rclcpp::Time> last_processed_stamp_;
+
   // Synchronized subscribers for image (via image_transport) and camera_info
   image_transport::SubscriberFilter sub_image_;
   std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>> sub_camera_info_;

@@ -147,6 +147,13 @@ void DepthAnythingV3Node::onImageCameraInfo(
   const sensor_msgs::msg::Image::ConstSharedPtr & image_msg,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg)
 {
+  // A sleeping pylon driver republishes its last frame with an unchanged
+  // stamp; re-inferring it wastes GPU and produces stale-stamped clouds.
+  const rclcpp::Time stamp(image_msg->header.stamp);
+  if (last_processed_stamp_.has_value() && stamp == *last_processed_stamp_) {
+    return;
+  }
+  last_processed_stamp_ = stamp;
 
   cv_bridge::CvImagePtr in_image_ptr;
   try {
