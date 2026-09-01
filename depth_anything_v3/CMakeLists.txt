@@ -170,6 +170,13 @@ add_executable(compare_trt src/compare_trt.cpp)
 target_include_directories(compare_trt PRIVATE ${TENSORRT_INCLUDE_DIR} ${CUDA_INCLUDE_DIRS})
 target_link_libraries(compare_trt ${TENSORRT_LIBRARY} ${CUDA_LIBRARIES})
 
+# L4T driver libs (nvdla_*, nvrm_*) needed by libnvinfer/libcuda are mounted by
+# the nvidia container runtime on the Jetson and absent in build containers;
+# don't require resolving them when linking executables.
+foreach(tgt depth_anything_v3_main generate_engines compare_trt)
+  target_link_options(${tgt} PRIVATE "-Wl,--allow-shlib-undefined")
+endforeach()
+
 # Install targets
 install(TARGETS
   tensorrt_depth_anything
