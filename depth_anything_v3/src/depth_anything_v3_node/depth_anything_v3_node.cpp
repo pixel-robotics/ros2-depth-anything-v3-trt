@@ -97,13 +97,15 @@ DepthAnythingV3Node::DepthAnythingV3Node(const rclcpp::NodeOptions & node_option
 
   RCLCPP_INFO(get_logger(), "Using ApproximateTime synchronizer with queue size 10");
 
-  // Debug subscribers to check if individual topics are arriving
-  debug_image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "~/input/image", rclcpp::SensorDataQoS(),
-    std::bind(&DepthAnythingV3Node::onImageDebug, this, std::placeholders::_1));
-  debug_camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-    "~/input/camera_info", rclcpp::SensorDataQoS(),
-    std::bind(&DepthAnythingV3Node::onCameraInfoDebug, this, std::placeholders::_1));
+  // Hooks on the synchronized subscribers themselves — no second copy of every
+  // full-size frame just to count it.
+  sub_image_.registerCallback(std::bind(&DepthAnythingV3Node::onImageIn, this, _1));
+  sub_camera_info_->registerCallback(std::bind(&DepthAnythingV3Node::onCameraInfoIn, this, _1));
+
+  input_stall_timeout_s_ = declare_parameter<double>("input_stall_timeout_s", 10.0);
+  if (input_stall_timeout_s_ > 0.0) {
+    stall_timer_ = create_wall_timer(1s, std::bind(&DepthAnythingV3Node::checkInputStall, this));
+  }
 
   RCLCPP_INFO(get_logger(), "Depth Anything V3 TensorRT node initialized successfully");
   RCLCPP_INFO(get_logger(), "Waiting for synchronized messages on:");
@@ -176,8 +178,15 @@ void DepthAnythingV3Node::onImageCameraInfo(
   std::vector<cv::Mat> input_images;
   input_images.push_back(in_image_ptr->image);
 
+  // The full-size depth image costs a 4K upsample per frame; only make it when
+  // someone actually consumes it.
+  const bool full_res_depth = pub_depth_image_->get_subscription_count() > 0 ||
+    (node_param_.enable_debug && pub_depth_image_debug_);
+
   auto start = std::chrono::high_resolution_clock::now();
-  bool success = tensorrt_depth_anything_->doInference(input_images, *camera_info_msg, node_param_.point_cloud_downsample_factor, node_param_.colorize_point_cloud);
+  bool success = tensorrt_depth_anything_->doInference(
+    input_images, *camera_info_msg, node_param_.point_cloud_downsample_factor,
+    node_param_.colorize_point_cloud, full_res_depth);
   auto end = std::chrono::high_resolution_clock::now();
   const double inference_time_sec = std::chrono::duration<double>(end - start).count();
 
@@ -192,11 +201,13 @@ void DepthAnythingV3Node::onImageCameraInfo(
   const cv::Mat& depth_image = tensorrt_depth_anything_->getDepthImage();
 
   // Publish depth image (32FC1 format for accurate depth values)
-  cv_bridge::CvImage cv_img_depth;
-  cv_img_depth.image = depth_image;
-  cv_img_depth.encoding = "32FC1";
-  cv_img_depth.header = image_msg->header;
-  pub_depth_image_->publish(*cv_img_depth.toImageMsg());
+  if (pub_depth_image_->get_subscription_count() > 0) {
+    cv_bridge::CvImage cv_img_depth;
+    cv_img_depth.image = depth_image;
+    cv_img_depth.encoding = "32FC1";
+    cv_img_depth.header = image_msg->header;
+    pub_depth_image_->publish(*cv_img_depth.toImageMsg());
+  }
 
   // Publish point cloud
   sensor_msgs::msg::PointCloud2 point_cloud = tensorrt_depth_anything_->getPointCloud();
@@ -325,22 +336,41 @@ int DepthAnythingV3Node::getColorMapType(const std::string& colormap_name)
   return cv::COLORMAP_JET;
 }
 
-void DepthAnythingV3Node::onImageDebug(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
+void DepthAnythingV3Node::onImageIn(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
-  static int image_count = 0;
-  image_count++;
+  image_count_++;
+  last_image_time_ = std::chrono::steady_clock::now();
   RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
     "[DEBUG] Received image #%d, encoding: %s, size: %ux%u, timestamp: %d.%09d",
-    image_count, msg->encoding.c_str(), msg->width, msg->height, msg->header.stamp.sec, msg->header.stamp.nanosec);
+    image_count_, msg->encoding.c_str(), msg->width, msg->height, msg->header.stamp.sec, msg->header.stamp.nanosec);
 }
 
-void DepthAnythingV3Node::onCameraInfoDebug(const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg)
+void DepthAnythingV3Node::onCameraInfoIn(const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg)
 {
-  static int camera_info_count = 0;
-  camera_info_count++;
+  camera_info_count_++;
+  last_camera_info_time_ = std::chrono::steady_clock::now();
   RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
     "[DEBUG] Received camera info #%d, frame: %s, timestamp: %d.%09d",
-    camera_info_count, msg->header.frame_id.c_str(), msg->header.stamp.sec, msg->header.stamp.nanosec);
+    camera_info_count_, msg->header.frame_id.c_str(), msg->header.stamp.sec, msg->header.stamp.nanosec);
+}
+
+void DepthAnythingV3Node::checkInputStall()
+{
+  // Requires a stream that once worked: an input that never delivered an image
+  // is a wiring problem, and restarting would not fix it.
+  if (!last_image_time_ || !last_camera_info_time_) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  const double since_image = std::chrono::duration<double>(now - *last_image_time_).count();
+  const double since_info = std::chrono::duration<double>(now - *last_camera_info_time_).count();
+  if (since_image > input_stall_timeout_s_ && since_info < input_stall_timeout_s_) {
+    RCLCPP_FATAL(get_logger(),
+      "No image for %.0f s while camera_info keeps arriving (%d images, %d camera infos so far)"
+      " - exiting so the launch respawns this node",
+      since_image, image_count_, camera_info_count_);
+    rclcpp::shutdown();
+  }
 }
 
 } // namespace depth_anything_v3

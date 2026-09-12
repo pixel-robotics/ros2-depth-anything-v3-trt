@@ -20,6 +20,7 @@
 #else
 #include <cv_bridge/cv_bridge.h>
 #endif
+#include <chrono>
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <optional>
@@ -72,18 +73,23 @@ private:
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::CameraInfo> ApproxSyncPolicy;
   std::shared_ptr<message_filters::Synchronizer<ApproxSyncPolicy>> sync_;
 
-  // Debug subscribers (separate from sync)
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr debug_image_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr debug_camera_info_sub_;
-
   // Callbacks
   void onImageCameraInfo(
     const sensor_msgs::msg::Image::ConstSharedPtr & image_msg,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg);
 
-  // Debug callbacks for individual topics
-  void onImageDebug(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
-  void onCameraInfoDebug(const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg);
+  // Per-message hooks on the synchronized subscribers: trace lines and input
+  // liveness. A stall — camera_info still arriving, images not, after images
+  // were seen — ends the process so the launch respawns it.
+  void onImageIn(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
+  void onCameraInfoIn(const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg);
+  void checkInputStall();
+  int image_count_{0};
+  int camera_info_count_{0};
+  std::optional<std::chrono::steady_clock::time_point> last_image_time_;
+  std::optional<std::chrono::steady_clock::time_point> last_camera_info_time_;
+  rclcpp::TimerBase::SharedPtr stall_timer_;
+  double input_stall_timeout_s_{};
 
   // Publishers
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_depth_image_;

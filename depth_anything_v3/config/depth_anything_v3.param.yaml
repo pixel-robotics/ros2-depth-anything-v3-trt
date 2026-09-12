@@ -15,6 +15,10 @@ depth_anything_v3:
     sky_threshold: 0.3               # Threshold for sky classification (lower = more sky)
     sky_depth_cap: 200.0             # Maximum depth value to fill sky regions
 
+    # Exit (the launch respawns the node) when camera_info keeps arriving but no
+    # image did for this long after images were seen. 0 disables.
+    input_stall_timeout_s: 10.0
+
     # Point cloud downsampling (1 = no downsampling, 10 = every 10th point)
     point_cloud_downsample_factor: 2
 
