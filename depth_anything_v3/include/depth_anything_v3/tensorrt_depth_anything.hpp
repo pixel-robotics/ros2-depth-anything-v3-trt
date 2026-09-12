@@ -51,7 +51,7 @@ public:
     const size_t max_workspace_size = (1 << 30),
     const std::string & backend = "tensorrt");
 
-  bool doInference(const std::vector<cv::Mat> & images, const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, bool colorize_pointcloud = false);
+  bool doInference(const std::vector<cv::Mat> & images, const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, bool colorize_pointcloud = false, bool full_res_depth = true);
 
   void initPreprocessBuffer(int width, int height);
 
@@ -70,7 +70,7 @@ private:
   bool inferOrt();
 #endif
 
-  void postprocess(const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, const cv::Mat & rgb_image = cv::Mat());
+  void postprocess(const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, const cv::Mat & rgb_image = cv::Mat(), bool full_res_depth = true);
 
   void buildPointCloud(
     const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor,

@@ -255,7 +255,8 @@ bool TensorRTDepthAnything::doInference(
   const std::vector<cv::Mat> & images,
   const sensor_msgs::msg::CameraInfo & camera_info,
   int downsample_factor,
-  bool colorize_pointcloud)
+  bool colorize_pointcloud,
+  bool full_res_depth)
 {
   if (images.empty()) {
     RCLCPP_ERROR(rclcpp::get_logger("TensorRTDepthAnything"), "No images provided for inference.");
@@ -288,7 +289,7 @@ bool TensorRTDepthAnything::doInference(
 
   // Postprocess with downsampling
   cv::Mat rgb_for_pointcloud = colorize_pointcloud ? images[0] : cv::Mat();
-  postprocess(camera_info, downsample_factor, rgb_for_pointcloud);
+  postprocess(camera_info, downsample_factor, rgb_for_pointcloud, full_res_depth);
 
   return true;
 }
@@ -471,7 +472,7 @@ bool TensorRTDepthAnything::inferOrt()
 #endif
 
 void TensorRTDepthAnything::postprocess(
-  const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor, const cv::Mat & rgb_image)
+  const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor, const cv::Mat & rgb_image, bool full_res_depth)
 {
   int height = input_height_;
   int width = input_width_;
@@ -556,8 +557,13 @@ void TensorRTDepthAnything::postprocess(
     rclcpp::get_logger("TensorRTDepthAnything"),
     "Focal length in pixels: %.6f (scale factor: %.6f)", focal_pixels, focal_scale);
 
-  cv::resize(model_depth_, depth_image_, cv::Size(src_width_, src_height_), 0, 0, cv::INTER_CUBIC);
-
+  if (full_res_depth) {
+    cv::resize(model_depth_, depth_image_, cv::Size(src_width_, src_height_), 0, 0, cv::INTER_CUBIC);
+  } else {
+    // Nobody consumes the full-size depth image; the point cloud only needs
+    // the network-resolution one.
+    depth_image_ = model_depth_;
+  }
 
   cv::Mat colorized = rgb_image;
   if (!colorized.empty() &&
