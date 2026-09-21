@@ -340,8 +340,8 @@ void DepthAnythingV3Node::onImageIn(const sensor_msgs::msg::Image::ConstSharedPt
 {
   image_count_++;
   last_image_time_ = std::chrono::steady_clock::now();
-  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-    "[DEBUG] Received image #%d, encoding: %s, size: %ux%u, timestamp: %d.%09d",
+  RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000,
+    "Received image #%d, encoding: %s, size: %ux%u, timestamp: %d.%09d",
     image_count_, msg->encoding.c_str(), msg->width, msg->height, msg->header.stamp.sec, msg->header.stamp.nanosec);
 }
 
@@ -349,8 +349,8 @@ void DepthAnythingV3Node::onCameraInfoIn(const sensor_msgs::msg::CameraInfo::Con
 {
   camera_info_count_++;
   last_camera_info_time_ = std::chrono::steady_clock::now();
-  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-    "[DEBUG] Received camera info #%d, frame: %s, timestamp: %d.%09d",
+  RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000,
+    "Received camera info #%d, frame: %s, timestamp: %d.%09d",
     camera_info_count_, msg->header.frame_id.c_str(), msg->header.stamp.sec, msg->header.stamp.nanosec);
 }
 
